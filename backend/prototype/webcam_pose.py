@@ -1,8 +1,17 @@
 """
-PaceVision — Webcam Pose Prototype
-====================================
+PaceVision — Webcam Pose Prototype (MediaPipe Tasks API)
+=========================================================
 Standalone script for experimenting with MediaPipe Pose detection live from webcam.
 Draws the full body skeleton, landmark indices, FPS, and a right-side XYZ table.
+
+WHY TASKS API (not mp.solutions):
+  MediaPipe 0.10.21+ dropped the legacy `mp.solutions` namespace entirely.
+  The current package (0.10.35) only exposes `mediapipe.tasks`.
+  The Tasks API is also the production-ready path for PaceVision.
+
+FIRST RUN — MODEL DOWNLOAD:
+  The script auto-downloads pose_landmarker_heavy.task (~25 MB) on first run
+  and saves it next to this file. Subsequent runs use the cached file.
 
 SETUP:
     cd backend
@@ -12,63 +21,67 @@ SETUP:
     Press Q to quit.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-HOW MEDIAPIPE POSE WORKS
+HOW MEDIAPIPE TASKS POSE WORKS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-MediaPipe Pose runs a two-stage ML pipeline on each frame:
+The Tasks API replaces the legacy solutions API with a file-based model loader.
 
-  Stage 1 — BlazePose Detector
-    Finds the person and produces a tight bounding box + key anchor points.
-    Only runs when tracking is lost; otherwise Stage 2 runs alone (fast path).
+  Running modes:
+    IMAGE       — single frame, no temporal context
+    VIDEO       — frame sequence with monotonic timestamps (we use this)
+    LIVE_STREAM — callback-based async, for highest throughput
 
-  Stage 2 — BlazePose Landmark Model
-    Takes the cropped body region and regresses 33 3D landmark positions.
-    model_complexity controls the model size:
-      0 = Lite  (fastest, least accurate)
-      1 = Full
-      2 = Heavy (slowest, most accurate) ← PaceVision spec uses this
+  We use VIDEO mode: each frame is stamped with elapsed milliseconds so the
+  model can apply temporal smoothing across frames.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-COORDINATE SYSTEMS — Two representations returned per frame
+COORDINATE SYSTEMS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  1. pose_landmarks  (NORMALIZED IMAGE COORDS)
-     Each landmark: x, y in [0.0, 1.0] relative to frame width/height
-                    z = depth relative to hip midpoint (rough, not metric)
-     Usage: multiply x*frame_w, y*frame_h → pixel position for drawing
+  result.pose_landmarks[0]        — NormalizedLandmark list
+    x, y : [0.0, 1.0] relative to frame width / height
+    z    : depth relative to hip midpoint (not metric, not used for angles)
+    visibility, presence : [0.0, 1.0] confidence scores
 
-  2. pose_world_landmarks  (WORLD COORDS — meters)
-     Each landmark: x, y, z in real-world metric coordinates
-     Origin = midpoint between the two hips
-       +x = subject's right
-       +y = downward
-       +z = away from camera (into the screen)
-     Usage: angle calculations — this is what PaceVision's angle_engine.py will use
-
-  Each landmark also has a visibility field [0.0–1.0]:
-    1.0 = fully visible, confident
-    0.0 = occluded or out of frame
+  result.pose_world_landmarks[0]  — Landmark list  (WHAT WE USE FOR ANGLES)
+    x, y, z : real-world metric coordinates (meters)
+    origin   = midpoint between hips
+    +x right  |  +y downward  |  +z away from camera
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 LIVE FRAME PROCESSING PIPELINE
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   webcam BGR frame
-    → flip horizontally (mirror so your left = screen left)
-    → convert BGR → RGB  (MediaPipe expects RGB)
-    → pose.process(rgb)  → results
-         ├── results.pose_landmarks        → draw skeleton + indices on frame
-         └── results.pose_world_landmarks  → render XYZ table on side panel
+    → flip horizontally (mirror)
+    → convert BGR → RGB
+    → wrap in mp.Image(SRGB)
+    → landmarker.detect_for_video(mp_image, timestamp_ms)
+         ├── result.pose_landmarks[0]       → draw skeleton + indices on frame
+         └── result.pose_world_landmarks[0] → render XYZ table on side panel
     → combine frame + table panel (np.hstack)
     → cv2.imshow
 """
 
 import time
+import urllib.request
+from pathlib import Path
 
 import cv2
-import mediapipe.python.solutions.pose as mp_pose
-import mediapipe.python.solutions.drawing_utils as mp_drawing
-import mediapipe.python.solutions.drawing_styles as mp_drawing_styles
+import mediapipe as mp
 import numpy as np
+from mediapipe.tasks import python as mp_tasks
+from mediapipe.tasks.python import vision as mp_vision
 
-# ── MediaPipe 33 landmark map (full reference) ────────────────────────────────
+# ── Model file ────────────────────────────────────────────────────────────────
+# The heavy model matches PaceVision's production accuracy requirement.
+# Swap to pose_landmarker_lite.task or pose_landmarker_full.task for faster FPS.
+MODEL_FILENAME = "pose_landmarker_heavy.task"
+MODEL_PATH     = Path(__file__).parent / MODEL_FILENAME
+MODEL_URL      = (
+    "https://storage.googleapis.com/mediapipe-models/"
+    "pose_landmarker/pose_landmarker_heavy/float16/latest/"
+    "pose_landmarker_heavy.task"
+)
+
+# ── MediaPipe 33 landmark map (reference) ────────────────────────────────────
 #
 #  Face
 #   0  nose              1  left_eye_inner     2  left_eye
@@ -88,10 +101,27 @@ import numpy as np
 #  29  left_heel        30  right_heel        31  left_foot_index
 #  32  right_foot_index
 
-# Joints shown in the XYZ table — focused on what PaceVision's angle engine needs:
-# ears (trunk lean), shoulders (arm swing / trunk lean), elbows & wrists (arm swing),
-# hips (hip flexion), knees (knee flexion), ankles + heels + foot (ankle dorsiflexion,
-# overstriding detection).
+# Skeleton connections — same 35 bone pairs as the legacy solutions API
+POSE_CONNECTIONS = frozenset([
+    # Face
+    (0, 1), (1, 2), (2, 3), (3, 7),
+    (0, 4), (4, 5), (5, 6), (6, 8),
+    (9, 10),
+    # Shoulders
+    (11, 12),
+    # Left arm
+    (11, 13), (13, 15), (15, 17), (15, 19), (15, 21), (17, 19),
+    # Right arm
+    (12, 14), (14, 16), (16, 18), (16, 20), (16, 22), (18, 20),
+    # Torso
+    (11, 23), (12, 24), (23, 24),
+    # Left leg
+    (23, 25), (25, 27), (27, 29), (27, 31), (29, 31),
+    # Right leg
+    (24, 26), (26, 28), (28, 30), (28, 32), (30, 32),
+])
+
+# Joints shown in the XYZ table — PaceVision angle engine landmarks
 KEY_JOINTS: dict[int, str] = {
     0:  "Nose",
     7:  "L Ear",
@@ -115,11 +145,9 @@ KEY_JOINTS: dict[int, str] = {
 }
 
 # ── Layout ─────────────────────────────────────────────────────────────────────
-TABLE_W       = 345   # Width of the right-side table panel (pixels)
-ROW_H         = 22    # Height per data row
-HEADER_H      = 52    # Space reserved above the data rows (title + column headers)
-
-# Column X positions inside the table panel
+TABLE_W   = 345
+ROW_H     = 22
+HEADER_H  = 52
 COL_IDX   =   6
 COL_NAME  =  34
 COL_X     = 148
@@ -127,105 +155,128 @@ COL_Y     = 218
 COL_Z     = 288
 
 # Colors (BGR)
-C_TITLE    = (210, 210, 210)
-C_SUBTEXT  = (100, 100, 100)
-C_COLHEAD  = (180, 180, 180)
-C_DIVIDER  = (60,  60,  60)
-C_ROW_A    = (46,  46,  46)
-C_ROW_B    = (32,  32,  32)
-C_IDX      = (90, 160, 255)
-C_LABEL    = (180, 220, 255)
-C_VALUE    = (130, 255, 130)
-C_DIM      = (70,  70, 110)   # Low-visibility landmarks
-C_FPS      = (0,  220, 100)
-C_WARN     = (60,  60,  60)
+C_TITLE   = (210, 210, 210)
+C_SUBTEXT = (100, 100, 100)
+C_COLHEAD = (180, 180, 180)
+C_DIVIDER = (60,  60,  60)
+C_ROW_A   = (46,  46,  46)
+C_ROW_B   = (32,  32,  32)
+C_IDX     = (90, 160, 255)
+C_LABEL   = (180, 220, 255)
+C_VALUE   = (130, 255, 130)
+C_DIM     = (70,  70, 110)
+C_FPS     = (0,  220, 100)
+C_BONE    = (0,  200,  80)
+C_JOINT   = (0,  255, 255)
+C_WARN    = (60,  60,  60)
 
-FONT  = cv2.FONT_HERSHEY_SIMPLEX
-AA    = cv2.LINE_AA
+FONT = cv2.FONT_HERSHEY_SIMPLEX
+AA   = cv2.LINE_AA
+
+
+# ── Model bootstrap ────────────────────────────────────────────────────────────
+
+def ensure_model() -> None:
+    """Download the pose landmarker model file if not already present."""
+    if MODEL_PATH.exists():
+        return
+    print(f"Downloading {MODEL_FILENAME} (~25 MB) — one-time setup...")
+    urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
+    print(f"Saved to {MODEL_PATH}")
 
 
 # ── Drawing helpers ────────────────────────────────────────────────────────────
 
+def draw_skeleton(
+    frame: np.ndarray,
+    norm_lms,           # result.pose_landmarks[0]  — normalized image coords
+    frame_w: int,
+    frame_h: int,
+) -> None:
+    """
+    Draw skeleton connections and landmark dots on the video frame.
+
+    norm_lms: list of NormalizedLandmark — x,y in [0,1] relative to frame size.
+    Joints with visibility < 0.4 are skipped to reduce noise from occluded points.
+    """
+    # Convert all landmarks to pixel coords once
+    pts = [
+        (int(lm.x * frame_w), int(lm.y * frame_h))
+        for lm in norm_lms
+    ]
+
+    # Draw bone connections
+    for (a, b) in POSE_CONNECTIONS:
+        if norm_lms[a].visibility < 0.4 or norm_lms[b].visibility < 0.4:
+            continue
+        cv2.line(frame, pts[a], pts[b], C_BONE, 2, AA)
+
+    # Draw joint circles + index labels
+    for idx, lm in enumerate(norm_lms):
+        if lm.visibility < 0.4:
+            continue
+        cv2.circle(frame, pts[idx], 4, C_JOINT, -1, AA)
+        cv2.putText(frame, str(idx), (pts[idx][0] + 5, pts[idx][1] - 5),
+                    FONT, 0.30, (255, 255, 0), 1, AA)
+
+
 def draw_table(panel: np.ndarray, world_lms) -> None:
     """
-    Render the world-coordinate XYZ table onto `panel`.
+    Render the world-coordinate XYZ table onto the right-side panel.
 
-    Parameters
-    ----------
-    panel : np.ndarray  — the right-side canvas (height × TABLE_W × 3, uint8)
-    world_lms          — results.pose_world_landmarks.landmark (list of 33 items)
-                         Each item: .x .y .z (meters) and .visibility (0–1)
+    world_lms: result.pose_world_landmarks[0] — Landmark list (meters, hip origin).
+    Rows dim when visibility < 0.5 (landmark occluded or uncertain).
     """
     h = panel.shape[0]
 
-    # ── Panel header ──────────────────────────────────────────────────────────
+    # Header
     cv2.putText(panel, "WORLD LANDMARKS (meters)", (6, 18),
                 FONT, 0.40, C_TITLE, 1, AA)
     cv2.putText(panel, "origin=hip midpoint  +x right  +y down  +z back",
                 (6, 34), FONT, 0.27, C_SUBTEXT, 1, AA)
 
-    # ── Column headers ────────────────────────────────────────────────────────
+    # Column headers
     cv2.line(panel, (0, HEADER_H - 10), (TABLE_W, HEADER_H - 10), C_DIVIDER, 1)
-    cv2.putText(panel, "IDX", (COL_IDX,  HEADER_H),     FONT, 0.36, C_COLHEAD, 1, AA)
-    cv2.putText(panel, "JOINT",  (COL_NAME, HEADER_H),  FONT, 0.36, C_COLHEAD, 1, AA)
-    cv2.putText(panel, "X",      (COL_X,    HEADER_H),  FONT, 0.36, C_COLHEAD, 1, AA)
-    cv2.putText(panel, "Y",      (COL_Y,    HEADER_H),  FONT, 0.36, C_COLHEAD, 1, AA)
-    cv2.putText(panel, "Z",      (COL_Z,    HEADER_H),  FONT, 0.36, C_COLHEAD, 1, AA)
+    cv2.putText(panel, "IDX",   (COL_IDX,  HEADER_H), FONT, 0.36, C_COLHEAD, 1, AA)
+    cv2.putText(panel, "JOINT", (COL_NAME, HEADER_H), FONT, 0.36, C_COLHEAD, 1, AA)
+    cv2.putText(panel, "X",     (COL_X,    HEADER_H), FONT, 0.36, C_COLHEAD, 1, AA)
+    cv2.putText(panel, "Y",     (COL_Y,    HEADER_H), FONT, 0.36, C_COLHEAD, 1, AA)
+    cv2.putText(panel, "Z",     (COL_Z,    HEADER_H), FONT, 0.36, C_COLHEAD, 1, AA)
     cv2.line(panel, (0, HEADER_H + 6), (TABLE_W, HEADER_H + 6), C_DIVIDER, 1)
 
-    # ── Data rows ─────────────────────────────────────────────────────────────
+    # Data rows
     for row_i, (idx, name) in enumerate(KEY_JOINTS.items()):
-        text_y  = HEADER_H + 8 + row_i * ROW_H + ROW_H - 5   # baseline
+        text_y  = HEADER_H + 8 + row_i * ROW_H + ROW_H - 5
         rect_y0 = HEADER_H + 8 + row_i * ROW_H
         rect_y1 = rect_y0 + ROW_H
-
         if rect_y1 > h:
-            break   # out of panel bounds
+            break
 
-        # Alternating row background
         bg = C_ROW_A if row_i % 2 == 0 else C_ROW_B
         cv2.rectangle(panel, (0, rect_y0), (TABLE_W, rect_y1), bg, -1)
 
         lm      = world_lms[idx]
         low_vis = lm.visibility < 0.5
-        c_idx   = C_DIM if low_vis else C_IDX
-        c_lbl   = C_DIM if low_vis else C_LABEL
-        c_val   = C_DIM if low_vis else C_VALUE
+        c_i     = C_DIM if low_vis else C_IDX
+        c_l     = C_DIM if low_vis else C_LABEL
+        c_v     = C_DIM if low_vis else C_VALUE
 
-        cv2.putText(panel, f"{idx:2d}",      (COL_IDX,  text_y), FONT, 0.36, c_idx, 1, AA)
-        cv2.putText(panel, name,             (COL_NAME, text_y), FONT, 0.36, c_lbl, 1, AA)
-        cv2.putText(panel, f"{lm.x:+.3f}",  (COL_X,    text_y), FONT, 0.36, c_val, 1, AA)
-        cv2.putText(panel, f"{lm.y:+.3f}",  (COL_Y,    text_y), FONT, 0.36, c_val, 1, AA)
-        cv2.putText(panel, f"{lm.z:+.3f}",  (COL_Z,    text_y), FONT, 0.36, c_val, 1, AA)
-
-
-def draw_indices(frame: np.ndarray, pose_lms, w: int, h: int) -> None:
-    """
-    Draw each landmark's index number just above its joint dot on the video frame.
-
-    Uses pose_landmarks (normalized image coords) — converted to pixels by
-    multiplying x * frame_width and y * frame_height.
-
-    Skips landmarks with visibility < 0.4 to avoid cluttering occluded joints.
-    """
-    for idx, lm in enumerate(pose_lms.landmark):
-        if lm.visibility < 0.4:
-            continue
-        px = int(lm.x * w)
-        py = int(lm.y * h)
-        cv2.putText(frame, str(idx), (px + 5, py - 5),
-                    FONT, 0.30, (255, 255, 0), 1, AA)
+        cv2.putText(panel, f"{idx:2d}",     (COL_IDX,  text_y), FONT, 0.36, c_i, 1, AA)
+        cv2.putText(panel, name,            (COL_NAME, text_y), FONT, 0.36, c_l, 1, AA)
+        cv2.putText(panel, f"{lm.x:+.3f}", (COL_X,    text_y), FONT, 0.36, c_v, 1, AA)
+        cv2.putText(panel, f"{lm.y:+.3f}", (COL_Y,    text_y), FONT, 0.36, c_v, 1, AA)
+        cv2.putText(panel, f"{lm.z:+.3f}", (COL_Z,    text_y), FONT, 0.36, c_v, 1, AA)
 
 
 def draw_fps(frame: np.ndarray, fps: float) -> None:
-    """Overlay FPS counter in the top-left corner of the video frame."""
     cv2.putText(frame, f"FPS: {fps:.1f}", (10, 30), FONT, 0.55, C_FPS, 2, AA)
 
 
 # ── Main loop ──────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    # Index 0 = default system camera. Change to 1, 2 … for external cameras.
+    ensure_model()
+
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         raise RuntimeError(
@@ -234,83 +285,70 @@ def main() -> None:
         )
 
     print("PaceVision Pose Prototype running — press Q to quit")
-    print(f"Tracking {len(KEY_JOINTS)} key joints in the XYZ table")
 
-    # ── MediaPipe Pose ─────────────────────────────────────────────────────────
-    # model_complexity=2  → heaviest model, most accurate (PaceVision spec)
-    #                        lower to 0 or 1 if you get < 10 FPS
-    #
-    # min_detection_confidence → threshold for the person detector (Stage 1)
-    # min_tracking_confidence  → threshold for the landmark tracker (Stage 2)
-    # PaceVision spec: 0.9 for both. Lowered to 0.7 here for easier prototyping.
-    with mp_pose.Pose(
-        model_complexity=2,
-        min_detection_confidence=0.7,
-        min_tracking_confidence=0.7,
-        enable_segmentation=False,
-        smooth_landmarks=True,   # temporal smoothing across frames (built-in)
-    ) as pose:
+    # ── Tasks API — PoseLandmarker ─────────────────────────────────────────────
+    # RunningMode.VIDEO: frames are processed in order with monotonic timestamps.
+    # This enables temporal smoothing across frames inside the model.
+    # num_poses=1: we track a single runner (extend to >1 for multi-person).
+    base_options = mp_tasks.BaseOptions(model_asset_path=str(MODEL_PATH))
+    options = mp_vision.PoseLandmarkerOptions(
+        base_options=base_options,
+        running_mode=mp_vision.RunningMode.VIDEO,
+        num_poses=1,
+        min_pose_detection_confidence=0.7,   # set to 0.9 for production
+        min_pose_presence_confidence=0.7,
+        min_tracking_confidence=0.7,          # set to 0.9 for production
+    )
 
-        prev_time = time.perf_counter()
+    start_ms   = int(time.perf_counter() * 1000)
+    prev_time  = time.perf_counter()
 
+    with mp_vision.PoseLandmarker.create_from_options(options) as landmarker:
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
                 print("Empty frame — camera disconnected?")
                 break
 
-            # Mirror so your left side appears on the left of the screen
             frame = cv2.flip(frame, 1)
             frame_h, frame_w = frame.shape[:2]
 
             # ── MediaPipe inference ────────────────────────────────────────────
-            # Convert BGR (OpenCV default) → RGB (MediaPipe expects RGB).
-            # Marking the array non-writeable lets MediaPipe skip an internal copy.
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            rgb.flags.writeable = False
-            results = pose.process(rgb)  # ← the ML inference happens here
+            # Tasks API requires an mp.Image wrapper around the RGB numpy array.
+            # timestamp_ms must be strictly monotonically increasing for VIDEO mode.
+            rgb         = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            mp_image    = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+            timestamp_ms = int(time.perf_counter() * 1000) - start_ms
+            result      = landmarker.detect_for_video(mp_image, timestamp_ms)
 
             # ── Draw skeleton ──────────────────────────────────────────────────
-            # mp_drawing.draw_landmarks renders:
-            #   • Colored dots at each of the 33 landmark positions
-            #   • Lines along POSE_CONNECTIONS (35 bone pairs)
-            # It uses pose_landmarks (normalized [0,1] image coords internally).
-            if results.pose_landmarks:
-                mp_drawing.draw_landmarks(
-                    frame,
-                    results.pose_landmarks,
-                    mp_pose.POSE_CONNECTIONS,
-                    landmark_drawing_spec=mp_drawing_styles.get_default_pose_landmarks_style(),
-                )
-                draw_indices(frame, results.pose_landmarks, frame_w, frame_h)
+            # result.pose_landmarks is a list (one entry per detected person).
+            # [0] = first (and only) person when num_poses=1.
+            if result.pose_landmarks:
+                draw_skeleton(frame, result.pose_landmarks[0], frame_w, frame_h)
 
             # ── FPS ────────────────────────────────────────────────────────────
-            now      = time.perf_counter()
-            fps      = 1.0 / max(now - prev_time, 1e-9)
+            now       = time.perf_counter()
+            fps       = 1.0 / max(now - prev_time, 1e-9)
             prev_time = now
             draw_fps(frame, fps)
 
             # ── Table panel ────────────────────────────────────────────────────
-            # Dark background canvas the same height as the video frame
+            # pose_world_landmarks[0] has the same index as pose_landmarks[0].
             table_panel = np.full((frame_h, TABLE_W, 3), 28, dtype=np.uint8)
 
-            if results.pose_world_landmarks:
-                draw_table(table_panel, results.pose_world_landmarks.landmark)
+            if result.pose_world_landmarks:
+                draw_table(table_panel, result.pose_world_landmarks[0])
             else:
-                # No person detected — show a placeholder message
                 cv2.putText(table_panel, "No pose detected",
                             (10, frame_h // 2), FONT, 0.5, C_WARN, 1, AA)
                 cv2.putText(table_panel, "Make sure your full body is visible",
                             (10, frame_h // 2 + 22), FONT, 0.35, C_WARN, 1, AA)
 
-            # ── Combine and display ────────────────────────────────────────────
-            # np.hstack places the table panel to the right of the video frame.
-            # Both arrays must have the same height (frame_h).
+            # ── Display ────────────────────────────────────────────────────────
             combined = np.hstack([frame, table_panel])
             cv2.imshow("PaceVision — Pose Prototype  |  Q to quit", combined)
 
-            # waitKey(1) — process OS events, return key code.
-            # & 0xFF masks to 8-bit ASCII for cross-platform compatibility.
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 break
 
