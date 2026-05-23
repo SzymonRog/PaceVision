@@ -60,15 +60,28 @@ LIVE FRAME PROCESSING PIPELINE
     → cv2.imshow
 """
 
+import os
+import sys
 import time
 import urllib.request
 from pathlib import Path
+
+# Redirect C-level fd 2 to /dev/null during library init.
+# Qt (QFontDatabase) and abseil/GLOG write directly to fd 2 before any
+# Python logging configuration is possible, so os.environ tricks don't help.
+_saved_stderr = os.dup(2)
+_devnull = os.open(os.devnull, os.O_WRONLY)
+os.dup2(_devnull, 2)
+os.close(_devnull)
 
 import cv2
 import mediapipe as mp
 import numpy as np
 from mediapipe.tasks import python as mp_tasks
 from mediapipe.tasks.python import vision as mp_vision
+
+os.dup2(_saved_stderr, 2)  # restore stderr for runtime errors
+os.close(_saved_stderr)
 
 # ── Model file ────────────────────────────────────────────────────────────────
 # The heavy model matches PaceVision's production accuracy requirement.
@@ -185,6 +198,67 @@ def ensure_model() -> None:
     print(f"Saved to {MODEL_PATH}")
 
 
+# ── Camera bootstrap ───────────────────────────────────────────────────────────
+
+CAPTURE_W = 1280
+CAPTURE_H = 720
+
+
+def _frame_is_live(frame: np.ndarray) -> bool:
+    """Reject all-black frames that some V4L2 nodes (metadata devices) emit."""
+    return frame is not None and frame.size > 0 and float(frame.mean()) > 3.0
+
+
+def open_camera() -> cv2.VideoCapture:
+    """Return the first webcam index that actually delivers live frames.
+
+    On Linux, multiple /dev/videoN nodes can exist per physical camera
+    (image, metadata, sensor controls).  Only one streams real pixels;
+    the others return all-black buffers.  We probe each index, force
+    MJPG + 1280x720 (compatible with virtually every USB webcam), then
+    verify the frame is not solid black before accepting it.
+
+    Also: only one V4L2 consumer can read a camera at a time.  If a
+    previous run is still hanging on to /dev/videoN, every read here
+    will fail — kill the leaked python process and retry.
+    """
+    last_error = None
+    for idx in range(5):
+        for backend in (cv2.CAP_V4L2, cv2.CAP_ANY):
+            cap = cv2.VideoCapture(idx, backend)
+            if not cap.isOpened():
+                cap.release()
+                continue
+            # MJPG is the most widely supported USB-cam fourcc and avoids
+            # bandwidth issues that cause black frames at higher resolutions.
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH,  CAPTURE_W)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAPTURE_H)
+
+            # Discard warm-up frames — many cameras send black for the first ~10.
+            for _ in range(10):
+                cap.read()
+            ret, frame = cap.read()
+            if ret and _frame_is_live(frame):
+                w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                print(f"Camera opened: index={idx}  {w}x{h}  backend={backend}")
+                return cap
+            last_error = (
+                f"index={idx} backend={backend}: "
+                f"ret={ret} mean={float(frame.mean()) if frame is not None else 'n/a'}"
+            )
+            cap.release()
+    raise RuntimeError(
+        "No working webcam found (tried indices 0-4 with V4L2 and auto backends).\n"
+        f"Last attempt: {last_error}\n"
+        "Common causes on Linux Mint:\n"
+        "  • Another process is holding the camera (Cheese, browser, a leaked\n"
+        "    python from a previous run).  Run: pgrep -af webcam_pose  and kill.\n"
+        "  • Run: lsof /dev/video0   to see who has it open."
+    )
+
+
 # ── Drawing helpers ────────────────────────────────────────────────────────────
 
 def draw_skeleton(
@@ -277,12 +351,12 @@ def draw_fps(frame: np.ndarray, fps: float) -> None:
 def main() -> None:
     ensure_model()
 
-    cap = cv2.VideoCapture(0)
-    if not cap.isOpened():
-        raise RuntimeError(
-            "Cannot open webcam at index 0.\n"
-            "Try changing VideoCapture(0) to VideoCapture(1) or VideoCapture(2)."
-        )
+    cap = open_camera()
+
+    # WINDOW_NORMAL lets the user resize freely; we also set a generous initial size.
+    window_name = "PaceVision — Pose Prototype  |  Q to quit"
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(window_name, CAPTURE_W + TABLE_W, CAPTURE_H)
 
     print("PaceVision Pose Prototype running — press Q to quit")
 
@@ -303,59 +377,63 @@ def main() -> None:
     start_ms   = int(time.perf_counter() * 1000)
     prev_time  = time.perf_counter()
 
-    with mp_vision.PoseLandmarker.create_from_options(options) as landmarker:
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                print("Empty frame — camera disconnected?")
-                break
+    try:
+        with mp_vision.PoseLandmarker.create_from_options(options) as landmarker:
+            while cap.isOpened():
+                ret, frame = cap.read()
+                if not ret:
+                    print("Empty frame — camera disconnected?")
+                    break
 
-            frame = cv2.flip(frame, 1)
-            frame_h, frame_w = frame.shape[:2]
+                frame = cv2.flip(frame, 1)
+                frame_h, frame_w = frame.shape[:2]
 
-            # ── MediaPipe inference ────────────────────────────────────────────
-            # Tasks API requires an mp.Image wrapper around the RGB numpy array.
-            # timestamp_ms must be strictly monotonically increasing for VIDEO mode.
-            rgb         = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            mp_image    = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-            timestamp_ms = int(time.perf_counter() * 1000) - start_ms
-            result      = landmarker.detect_for_video(mp_image, timestamp_ms)
+                # ── MediaPipe inference ────────────────────────────────────────────
+                # Tasks API requires an mp.Image wrapper around the RGB numpy array.
+                # timestamp_ms must be strictly monotonically increasing for VIDEO mode.
+                rgb         = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                mp_image    = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+                timestamp_ms = int(time.perf_counter() * 1000) - start_ms
+                result      = landmarker.detect_for_video(mp_image, timestamp_ms)
 
-            # ── Draw skeleton ──────────────────────────────────────────────────
-            # result.pose_landmarks is a list (one entry per detected person).
-            # [0] = first (and only) person when num_poses=1.
-            if result.pose_landmarks:
-                draw_skeleton(frame, result.pose_landmarks[0], frame_w, frame_h)
+                # ── Draw skeleton ──────────────────────────────────────────────────
+                # result.pose_landmarks is a list (one entry per detected person).
+                # [0] = first (and only) person when num_poses=1.
+                if result.pose_landmarks:
+                    draw_skeleton(frame, result.pose_landmarks[0], frame_w, frame_h)
 
-            # ── FPS ────────────────────────────────────────────────────────────
-            now       = time.perf_counter()
-            fps       = 1.0 / max(now - prev_time, 1e-9)
-            prev_time = now
-            draw_fps(frame, fps)
+                # ── FPS ────────────────────────────────────────────────────────────
+                now       = time.perf_counter()
+                fps       = 1.0 / max(now - prev_time, 1e-9)
+                prev_time = now
+                draw_fps(frame, fps)
 
-            # ── Table panel ────────────────────────────────────────────────────
-            # pose_world_landmarks[0] has the same index as pose_landmarks[0].
-            table_panel = np.full((frame_h, TABLE_W, 3), 28, dtype=np.uint8)
+                # ── Table panel ────────────────────────────────────────────────────
+                # pose_world_landmarks[0] has the same index as pose_landmarks[0].
+                table_panel = np.full((frame_h, TABLE_W, 3), 28, dtype=np.uint8)
 
-            if result.pose_world_landmarks:
-                draw_table(table_panel, result.pose_world_landmarks[0])
-            else:
-                cv2.putText(table_panel, "No pose detected",
-                            (10, frame_h // 2), FONT, 0.5, C_WARN, 1, AA)
-                cv2.putText(table_panel, "Make sure your full body is visible",
-                            (10, frame_h // 2 + 22), FONT, 0.35, C_WARN, 1, AA)
+                if result.pose_world_landmarks:
+                    draw_table(table_panel, result.pose_world_landmarks[0])
+                else:
+                    cv2.putText(table_panel, "No pose detected",
+                                (10, frame_h // 2), FONT, 0.5, C_WARN, 1, AA)
+                    cv2.putText(table_panel, "Make sure your full body is visible",
+                                (10, frame_h // 2 + 22), FONT, 0.35, C_WARN, 1, AA)
 
-            # ── Display ────────────────────────────────────────────────────────
-            combined = np.hstack([frame, table_panel])
-            cv2.imshow("PaceVision — Pose Prototype  |  Q to quit", combined)
+                # ── Display ────────────────────────────────────────────────────────
+                combined = np.hstack([frame, table_panel])
+                cv2.imshow(window_name, combined)
 
-            if cv2.waitKey(1) & 0xFF == ord("q"):
-                break
-
-    cap.release()
-    cv2.destroyAllWindows()
-    print("Done.")
+                if cv2.waitKey(1) & 0xFF == ord("q"):
+                    break
+    finally:
+        cap.release()
+        cv2.destroyAllWindows()
+        print("Done.")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nInterrupted — exiting.")
