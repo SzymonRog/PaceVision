@@ -1,0 +1,8 @@
+mediapipe>=0.10.0,<0.11.0
+opencv-python
+numpy
+scipy
+fastapi
+uvicorn[standard]
+python-multipart
+pydantic
