@@ -22,6 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from api.routes_health import router as health_router
 from api.routes_session import router as session_router
+from api.stream import router as stream_router
 from api.ws_stream import router as ws_router
 from session.manager import SessionManager
 
@@ -55,4 +56,5 @@ app.add_middleware(
 # Register routers
 app.include_router(health_router)
 app.include_router(session_router)
+app.include_router(stream_router)
 app.include_router(ws_router)
