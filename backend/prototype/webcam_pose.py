@@ -63,13 +63,10 @@ LIVE FRAME PROCESSING PIPELINE
 import time
 
 import cv2
-import mediapipe as mp
+import mediapipe.python.solutions.pose as mp_pose
+import mediapipe.python.solutions.drawing_utils as mp_drawing
+import mediapipe.python.solutions.drawing_styles as mp_drawing_styles
 import numpy as np
-
-# ── MediaPipe setup ────────────────────────────────────────────────────────────
-mp_pose          = mp.solutions.pose
-mp_drawing       = mp.solutions.drawing_utils
-mp_drawing_styles = mp.solutions.drawing_styles
 
 # ── MediaPipe 33 landmark map (full reference) ────────────────────────────────
 #
