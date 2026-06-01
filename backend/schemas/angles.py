@@ -8,9 +8,9 @@ class AngleResult(BaseModel):
 
     name: str                          # e.g. "knee_flexion"
     value_deg: float                   # calculated angle in degrees
-    min_threshold: float               # optimal range lower bound
-    max_threshold: float               # optimal range upper bound
-    rating: str                        # "optimal" | "warning" | "poor"
+    min_threshold: float | None = None # deprecated — was optimal range lower bound
+    max_threshold: float | None = None # deprecated — was optimal range upper bound
+    rating: str | None = None          # deprecated — was "optimal" | "warning" | "poor"
     landmarks_used: tuple[int, int, int]  # the 3 landmark indices (a, b, c)
 
 

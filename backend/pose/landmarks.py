@@ -50,27 +50,26 @@ LANDMARK_NAMES: dict[int, str] = {
     32: "right_foot_index",
 }
 
-# Indices relevant to PaceVision's 5-angle calculations
+# Indices relevant to PaceVision's angle calculations.
+# Face (0-6, 9-10) and hand (17-22) landmarks are excluded — they are not
+# used in any angle calculation and skipping them saves ~42% of smoothing work.
 KEY_LANDMARK_INDICES: set[int] = {
-    0, 7, 8,            # nose, ears
-    11, 12, 13, 14,     # shoulders, elbows
-    15, 16,             # wrists
-    23, 24, 25, 26,     # hips, knees
-    27, 28, 29, 30,     # ankles, heels
-    31, 32,             # foot indices
+    7, 8,                # ears (trunk lean)
+    11, 12, 13, 14,      # shoulders, elbows (arm swing, hip/trunk)
+    15, 16,              # wrists (arm swing)
+    23, 24, 25, 26,      # hips, knees
+    27, 28, 29, 30,      # ankles, heels (heel = ankle fallback)
+    31, 32,              # foot indices (dorsiflexion)
 }
 
-# Skeleton connections for debug overlays (same as prototype)
+# Skeleton connections for overlay — only body, no face/hands.
 POSE_CONNECTIONS: frozenset[tuple[int, int]] = frozenset([
-    (0, 1), (1, 2), (2, 3), (3, 7),
-    (0, 4), (4, 5), (5, 6), (6, 8),
-    (9, 10),
-    (11, 12),
-    (11, 13), (13, 15), (15, 17), (15, 19), (15, 21), (17, 19),
-    (12, 14), (14, 16), (16, 18), (16, 20), (16, 22), (18, 20),
-    (11, 23), (12, 24), (23, 24),
-    (23, 25), (25, 27), (27, 29), (27, 31), (29, 31),
-    (24, 26), (26, 28), (28, 30), (28, 32), (30, 32),
+    (11, 12),                                               # shoulder bar
+    (11, 13), (13, 15),                                     # left arm
+    (12, 14), (14, 16),                                     # right arm
+    (11, 23), (12, 24), (23, 24),                           # torso
+    (23, 25), (25, 27), (27, 29), (27, 31), (29, 31),      # left leg
+    (24, 26), (26, 28), (28, 30), (28, 32), (30, 32),      # right leg
 ])
 
 
@@ -78,7 +77,11 @@ class LandmarkProcessor:
     """Converts and filters MediaPipe landmarks into PaceVision schemas."""
 
     @staticmethod
-    def extract_world_landmarks(mp_world_lms) -> list[RawLandmark]:
+    def extract_world_landmarks(
+        mp_world_lms,
+        *,
+        key_only: bool = True,
+    ) -> list[RawLandmark]:
         """Convert a MediaPipe world-landmark list to ``RawLandmark`` objects.
 
         Parameters
@@ -86,6 +89,10 @@ class LandmarkProcessor:
         mp_world_lms : list
             ``result.pose_world_landmarks[0]`` — one entry per landmark.
             Each element has .x, .y, .z, .visibility, .presence attributes.
+        key_only : bool
+            If True (default), only return landmarks in
+            ``KEY_LANDMARK_INDICES``.  Skips face/hand landmarks that
+            are not used in angle calculations, saving smoothing work.
         """
         return [
             RawLandmark(
@@ -98,6 +105,7 @@ class LandmarkProcessor:
                 presence=getattr(lm, "presence", lm.visibility),
             )
             for idx, lm in enumerate(mp_world_lms)
+            if not key_only or idx in KEY_LANDMARK_INDICES
         ]
 
     @staticmethod

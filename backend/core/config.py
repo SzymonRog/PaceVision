@@ -26,11 +26,6 @@ class Settings(BaseSettings):
         "pose_landmarker_heavy.task"
     )
 
-    # ── Camera ────────────────────────────────────────────────────────
-    capture_width: int = 1280
-    capture_height: int = 720
-    camera_warmup_frames: int = 10
-
     # ── MediaPipe detection ───────────────────────────────────────────
     min_detection_confidence: float = 0.7
     min_presence_confidence: float = 0.7
@@ -44,10 +39,29 @@ class Settings(BaseSettings):
     smoothing_window: int = 7
     smoothing_poly: int = 2
 
-    # ── Session limits ────────────────────────────────────────────────
-    max_sessions: int = 4
-    frame_queue_size: int = 2
-    output_queue_size: int = 5
+    # ── Video analysis ────────────────────────────────────────────────
+    max_upload_mb: int = 500
+    analysis_workers: int = 2
+    # Max jobs that may be queued or processing at once. New uploads beyond
+    # this are rejected with 429 to bound disk/memory usage.
+    max_active_jobs: int = 8
+    # Completed/failed jobs are retained this long before their data and temp
+    # files are reclaimed by the periodic cleanup task.
+    job_ttl_sec: int = 3600
+    # How often the background task sweeps expired jobs.
+    cleanup_interval_sec: int = 300
+    # Timeout (seconds) for the one-time MediaPipe model download.
+    model_download_timeout_sec: int = 120
+
+    # ── CORS ──────────────────────────────────────────────────────────
+    # Comma-separated list of allowed frontend origins. Override in prod with
+    # PACE_CORS_ORIGINS="https://your-app.vercel.app".
+    cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        """Parsed, whitespace-trimmed CORS origins."""
+        return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
 
 
 settings = Settings()

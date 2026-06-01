@@ -9,10 +9,10 @@ router = APIRouter(tags=["health"])
 
 @router.get("/health")
 async def health(request: Request) -> dict:
-    manager = request.app.state.session_manager
+    job_manager = request.app.state.job_manager
     return {
         "status": "ok",
-        "sessions_active": len(manager.list_sessions()),
+        "jobs_active": job_manager.count_unfinished(),
     }
 
 
@@ -20,12 +20,11 @@ async def health(request: Request) -> dict:
 async def debug_config() -> dict:
     """Return current non-sensitive configuration values."""
     return {
-        "capture_width": settings.capture_width,
-        "capture_height": settings.capture_height,
         "min_detection_confidence": settings.min_detection_confidence,
         "smoothing_window": settings.smoothing_window,
         "smoothing_poly": settings.smoothing_poly,
-        "max_sessions": settings.max_sessions,
         "num_poses": settings.num_poses,
         "visibility_threshold": settings.visibility_threshold,
+        "max_active_jobs": settings.max_active_jobs,
+        "analysis_workers": settings.analysis_workers,
     }

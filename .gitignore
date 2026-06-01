@@ -14,6 +14,10 @@ ENV/
 # MediaPipe / ML model cache
 *.task
 *.tflite
+*.part
+
+# Debug / scratch artifacts
+response.json
 
 # OS
 .DS_Store

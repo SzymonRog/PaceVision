@@ -1,0 +1,26 @@
+# Virtual environments (image installs fresh from requirements.txt)
+venv/
+.venv/
+env/
+ENV/
+
+# Python caches
+__pycache__/
+*.py[cod]
+*.pyo
+
+# The model is downloaded at build time; don't ship a local copy.
+*.task
+*.tflite
+
+# Dev-only / large artifacts
+notebooks/
+*.ipynb
+response.json
+
+# Docs & misc
+*.md
+.git/
+.gitignore
+.vscode/
+.idea/

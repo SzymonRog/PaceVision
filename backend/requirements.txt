@@ -1,12 +1,16 @@
-mediapipe>=0.10.0,<0.11.0
-opencv-python
-numpy
-scipy
-fastapi
-uvicorn[standard]
-python-multipart
-pydantic
-pydantic-settings
-websockets
-jupyter
-matplotlib
+# Pinned to the versions validated in development for reproducible builds.
+# Bump deliberately, not implicitly.
+mediapipe==0.10.35
+opencv-python==4.13.0.92
+imageio-ffmpeg==0.6.0
+numpy==2.4.6
+scipy==1.17.1
+fastapi==0.136.1
+uvicorn[standard]==0.47.0
+python-multipart==0.0.29
+pydantic==2.13.4
+pydantic-settings==2.14.1
+websockets==16.0
+nbformat==5.10.4
+jupyter==1.1.1
+matplotlib==3.10.9

@@ -7,6 +7,8 @@ Uses VIDEO running mode (synchronous, with temporal smoothing).
 
 from __future__ import annotations
 
+import logging
+import shutil
 import time
 import urllib.request
 from pathlib import Path
@@ -19,12 +21,14 @@ from mediapipe.tasks.python import vision as mp_vision
 
 from core.config import settings
 
+logger = logging.getLogger("pacevision.detector")
+
 
 class PoseDetector:
     """Synchronous pose detector using MediaPipe Tasks API (VIDEO mode).
 
     Each instance owns one ``PoseLandmarker``. Instances are **not**
-    thread-safe — each ``LiveSession`` must create its own detector.
+    thread-safe — each processing context must create its own detector.
     """
 
     def __init__(
@@ -93,9 +97,20 @@ class PoseDetector:
         if path.exists():
             return
         path.parent.mkdir(parents=True, exist_ok=True)
-        print(f"Downloading pose model (~25 MB) → {path} ...")
-        urllib.request.urlretrieve(model_url, path)
-        print("Download complete.")
+        logger.info("Downloading pose model (~25 MB) -> %s ...", path)
+        # Download to a temp file then rename, so an interrupted/timed-out
+        # download never leaves a truncated model in place.
+        tmp_path = path.with_suffix(path.suffix + ".part")
+        try:
+            with urllib.request.urlopen(
+                model_url, timeout=settings.model_download_timeout_sec,
+            ) as resp, open(tmp_path, "wb") as out:
+                shutil.copyfileobj(resp, out)
+            tmp_path.replace(path)
+        except Exception:
+            tmp_path.unlink(missing_ok=True)
+            raise
+        logger.info("Pose model download complete.")
 
     # ── context manager ───────────────────────────────────────────────
 
