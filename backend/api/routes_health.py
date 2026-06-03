@@ -15,8 +15,6 @@ async def health(request: Request) -> dict:
         "jobs_active": job_manager.count_unfinished(),
     }
 
-@app.middleware("http")
-
 
 
 
