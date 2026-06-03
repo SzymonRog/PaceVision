@@ -15,6 +15,10 @@ async def health(request: Request) -> dict:
         "jobs_active": job_manager.count_unfinished(),
     }
 
+@app.middleware("http")
+
+
+
 
 @router.get("/debug/config")
 async def debug_config() -> dict:
