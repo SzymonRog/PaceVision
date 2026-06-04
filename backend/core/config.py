@@ -56,7 +56,7 @@ class Settings(BaseSettings):
     # ── CORS ──────────────────────────────────────────────────────────
     # Comma-separated list of allowed frontend origins. Override in prod with
     # PACE_CORS_ORIGINS="https://your-app.vercel.app".
-    cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
+    cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000,https://pace-vision.vercel.app"
 
     @property
     def cors_origin_list(self) -> list[str]:
