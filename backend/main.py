@@ -80,7 +80,7 @@ app = FastAPI(
 # CORS — origins configurable via PACE_CORS_ORIGINS (comma-separated).
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.cors_origin_list,
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -89,17 +89,6 @@ app.add_middleware(
     expose_headers=["Content-Range", "Accept-Ranges", "Content-Length"],
 )
 
-@app.options("/api/analyze-video")
-async def preflight_analyze_video(request: Request):
-    return Response(
-        status_code=200,
-        headers={
-            "Access-Control-Allow-Origin": request.headers.get("origin", "*"),
-            "Access-Control-Allow-Methods": "POST, OPTIONS",
-            "Access-Control-Allow-Headers": "*",
-            "Access-Control-Max-Age": "86400",
-        },
-    )
 
 # Register routers
 app.include_router(health_router)
