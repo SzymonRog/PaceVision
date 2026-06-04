@@ -28,6 +28,7 @@ from api.routes_health import router as health_router
 from api.routes_analyze import router as analyze_router
 from core.config import settings
 from jobs.manager import JobManager
+from fastapi import Request, Response
 
 logging.basicConfig(
     level=logging.INFO,
@@ -87,6 +88,18 @@ app.add_middleware(
     # streaming the annotated MP4 cross-origin.
     expose_headers=["Content-Range", "Accept-Ranges", "Content-Length"],
 )
+
+@app.options("/api/analyze-video")
+async def preflight_analyze_video(request: Request):
+    return Response(
+        status_code=200,
+        headers={
+            "Access-Control-Allow-Origin": request.headers.get("origin", "*"),
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+            "Access-Control-Max-Age": "86400",
+        },
+    )
 
 # Register routers
 app.include_router(health_router)
