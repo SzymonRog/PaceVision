@@ -2,10 +2,15 @@
 # Build context: the backend/ directory.
 FROM python:3.11-slim AS base
 
-# OpenCV / MediaPipe runtime libraries (libGL + glib).
+# OpenCV / MediaPipe runtime libraries.
+# MediaPipe 0.10.x's C bindings dlopen GLES + EGL at runtime, so libgl1 alone
+# is not enough — without libgles2/libegl1 you get:
+#   OSError: libGLESv2.so.2: cannot open shared object file
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libgl1 \
         libglib2.0-0 \
+        libgles2 \
+        libegl1 \
     && rm -rf /var/lib/apt/lists/*
 
 ENV PYTHONUNBUFFERED=1 \
