@@ -19,7 +19,6 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
-import tempfile
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -54,8 +53,11 @@ async def _cleanup_loop(job_manager: JobManager) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup / shutdown lifecycle hook."""
-    temp_dir = Path(tempfile.gettempdir()) / "pacevision_jobs"
-    app.state.job_manager = JobManager(temp_dir)
+    job_manager = JobManager(Path(settings.data_dir))
+    # Reconcile durable state: fail jobs interrupted by the restart, purge
+    # expired jobs, drop orphan files.
+    job_manager.recover_on_startup()
+    app.state.job_manager = job_manager
 
     cleanup_task = asyncio.create_task(_cleanup_loop(app.state.job_manager))
 

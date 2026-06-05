@@ -45,9 +45,13 @@ class Settings(BaseSettings):
     # Max jobs that may be queued or processing at once. New uploads beyond
     # this are rejected with 429 to bound disk/memory usage.
     max_active_jobs: int = 8
-    # Completed/failed jobs are retained this long before their data and temp
-    # files are reclaimed by the periodic cleanup task.
-    job_ttl_sec: int = 3600
+    # Durable storage root. In production this is a mounted Railway volume so
+    # job state + annotated videos survive restarts. Falls back to a temp dir
+    # locally (see JobManager) when the path is not writable.
+    data_dir: str = "/data"
+    # Completed/failed jobs (and their shareable links) live this long before
+    # their data and files are reclaimed. Default 24h.
+    job_ttl_sec: int = 86400
     # How often the background task sweeps expired jobs.
     cleanup_interval_sec: int = 300
     # Timeout (seconds) for the one-time MediaPipe model download.

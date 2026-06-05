@@ -11,11 +11,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Query, Request, UploadFile, File
+from fastapi import APIRouter, HTTPException, Query, Request, Response, UploadFile, File
 from fastapi.responses import FileResponse, StreamingResponse
 
 from analysis.stride_detector import CONTACT_METHODS, DEFAULT_CONTACT_METHOD
@@ -164,14 +163,16 @@ async def submit_video(
             detail="Server is busy processing other videos. Please retry shortly.",
         )
 
-    # Save upload to temp file
+    # Register the job (allocates its durable directory), then stream the
+    # upload into it. If the save fails (e.g. too large), drop the job so we
+    # don't leave an orphan queued row behind.
     ext = Path(file.filename).suffix.lower()  # type: ignore[arg-type]
-    temp_dir = job_manager._temp_dir
-    input_path = temp_dir / f"upload_{uuid.uuid4().hex[:12]}{ext}"
-    await _save_upload(file, input_path)
-
-    job = job_manager.create_job(input_path)
-    job.input_path = input_path
+    job = job_manager.create_job(ext)
+    try:
+        await _save_upload(file, job.input_path)
+    except Exception:
+        job_manager.delete_job(job.job_id)
+        raise
 
     # Submit to thread pool
     loop = asyncio.get_running_loop()
@@ -180,7 +181,7 @@ async def submit_video(
         _run_pipeline,
         job_manager,
         job.job_id,
-        str(input_path),
+        str(job.input_path),
         str(job.output_path),
         skip_frames,
         detection_height,
@@ -271,10 +272,9 @@ async def get_result(
     if job.status in (JobStatus.queued, JobStatus.processing):
         raise HTTPException(status_code=409, detail="Analysis still in progress")
 
-    if job.result is None:
+    base = job_manager.get_result(job_id)
+    if base is None:
         raise HTTPException(status_code=500, detail="Result missing")
-
-    base = job.result
     if contact_method == DEFAULT_CONTACT_METHOD:
         return base
 
@@ -322,6 +322,18 @@ async def download_video(job_id: str, request: Request) -> FileResponse:
     )
 
 
+@router.delete("/{job_id}", status_code=204)
+async def delete_job(job_id: str, request: Request) -> Response:
+    """Immediately delete a job's data and files ("delete now").
+
+    Idempotent: deleting an unknown/already-expired job still returns 204 so
+    the client gets a consistent result and existence isn't leaked.
+    """
+    job_manager: JobManager = request.app.state.job_manager
+    job_manager.delete_job(job_id)
+    return Response(status_code=204)
+
+
 @router.get("/{job_id}/notebook")
 async def download_notebook(job_id: str, request: Request) -> StreamingResponse:
     """Generate and download a Jupyter notebook with analysis plots."""
@@ -336,10 +348,11 @@ async def download_notebook(job_id: str, request: Request) -> StreamingResponse:
     if job.status != JobStatus.completed:
         raise HTTPException(status_code=409, detail="Analysis not yet completed")
 
-    if job.result is None:
+    result = job_manager.get_result(job_id)
+    if result is None:
         raise HTTPException(status_code=500, detail="Result missing")
 
-    nb = generate_notebook(job.result)
+    nb = generate_notebook(result)
     content = nbf.writes(nb)
 
     return StreamingResponse(
