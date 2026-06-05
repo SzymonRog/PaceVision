@@ -6,11 +6,15 @@ FROM python:3.11-slim AS base
 # MediaPipe 0.10.x's C bindings dlopen GLES + EGL at runtime, so libgl1 alone
 # is not enough — without libgles2/libegl1 you get:
 #   OSError: libGLESv2.so.2: cannot open shared object file
+# ffmpeg: OpenCV can only write mp4v (not browser-playable), so the pipeline
+# transcodes to H.264. The bundled imageio-ffmpeg binary is unreliable on this
+# slim image, so install a real system ffmpeg (preferred by the transcoder).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libgl1 \
         libglib2.0-0 \
         libgles2 \
         libegl1 \
+        ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 ENV PYTHONUNBUFFERED=1 \

@@ -354,16 +354,20 @@ class VideoPipeline:
         On any failure the raw mp4v file is promoted to ``output_path`` as a
         downloadable fallback.
         """
-        ffmpeg_exe: str | None = None
-        try:
-            import imageio_ffmpeg
+        # Prefer a real system ffmpeg (installed in the image); the bundled
+        # imageio-ffmpeg binary is unreliable on slim containers. Fall back to
+        # it only if no system ffmpeg is on PATH.
+        ffmpeg_exe: str | None = shutil.which("ffmpeg")
+        if ffmpeg_exe is None:
+            try:
+                import imageio_ffmpeg
 
-            ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
-        except Exception as exc:  # pragma: no cover - depends on env
-            logger.warning(
-                "imageio-ffmpeg unavailable (%s); serving mp4v render "
-                "(may not play inline).", exc,
-            )
+                ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+            except Exception as exc:  # pragma: no cover - depends on env
+                logger.warning(
+                    "No system ffmpeg and imageio-ffmpeg unavailable (%s); "
+                    "serving mp4v render (may not play inline).", exc,
+                )
 
         if ffmpeg_exe:
             cmd = [
