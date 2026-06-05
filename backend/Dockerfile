@@ -35,11 +35,11 @@ COPY . .
 # Railway/most PaaS inject $PORT; default to 8000 locally.
 ENV PORT=8000
 
-# Durable job state + annotated videos live here. In production, attach a
-# Railway volume mounted at /data so they survive restarts; without a volume
-# this is ephemeral container disk and state is lost on redeploy.
+# Durable job state + annotated videos live here. Attach a Railway Volume
+# mounted at /data (via the dashboard — Railway does not support the Docker
+# VOLUME instruction) so they survive restarts; without a mount this is
+# ephemeral container disk and state is lost on redeploy.
 ENV PACE_DATA_DIR=/data
-VOLUME ["/data"]
 
 EXPOSE 8000
 
