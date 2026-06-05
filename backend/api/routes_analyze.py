@@ -143,9 +143,9 @@ async def submit_video(
     request: Request,
     file: UploadFile = File(...),
     skip_frames: int = Query(default=1, ge=1, le=10, description="Process every Nth frame"),
-    detection_height: int | None = Query(
-        default=None, ge=240, le=1080,
-        description="Resize height for detection (None = original)",
+    detection_height: int = Query(
+        default=settings.detection_height_default, ge=240, le=1080,
+        description="Resize height for MediaPipe detection (lower = less memory)",
     ),
 ) -> AnalyzeVideoResponse:
     """Upload a video for asynchronous pose analysis.

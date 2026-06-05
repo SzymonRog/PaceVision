@@ -17,14 +17,30 @@ class Settings(BaseSettings):
     model_config = {"env_prefix": "PACE_"}
 
     # ── MediaPipe model ───────────────────────────────────────────────
-    model_path: str = str(
-        _BACKEND_DIR / "prototype" / "pose_landmarker_heavy.task"
-    )
-    model_url: str = (
-        "https://storage.googleapis.com/mediapipe-models/"
-        "pose_landmarker/pose_landmarker_heavy/float16/latest/"
-        "pose_landmarker_heavy.task"
-    )
+    # Model variant: "heavy" (most accurate, most memory), "full", or "lite"
+    # (smallest footprint). Override on memory-constrained hosts with
+    # PACE_MODEL_VARIANT=full to avoid OOM kills during analysis. The image
+    # bakes the "heavy" model; other variants are downloaded on first use.
+    model_variant: str = "heavy"
+
+    @property
+    def _variant(self) -> str:
+        v = self.model_variant.lower()
+        return v if v in ("heavy", "full", "lite") else "heavy"
+
+    @property
+    def model_path(self) -> str:
+        return str(
+            _BACKEND_DIR / "prototype" / f"pose_landmarker_{self._variant}.task"
+        )
+
+    @property
+    def model_url(self) -> str:
+        return (
+            "https://storage.googleapis.com/mediapipe-models/"
+            f"pose_landmarker/pose_landmarker_{self._variant}/float16/latest/"
+            f"pose_landmarker_{self._variant}.task"
+        )
 
     # ── MediaPipe detection ───────────────────────────────────────────
     min_detection_confidence: float = 0.7
@@ -42,6 +58,11 @@ class Settings(BaseSettings):
     # ── Video analysis ────────────────────────────────────────────────
     max_upload_mb: int = 500
     analysis_workers: int = 2
+    # Default height (px) to downscale frames to for MediaPipe detection.
+    # Full-resolution detection is a major memory consumer; 720 keeps
+    # side-view landmark accuracy while cutting peak RAM on hi-res phone
+    # footage. Clients may still override per-request (240–1080).
+    detection_height_default: int = 720
     # Max jobs that may be queued or processing at once. New uploads beyond
     # this are rejected with 429 to bound disk/memory usage.
     max_active_jobs: int = 8
