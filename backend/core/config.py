@@ -63,6 +63,10 @@ class Settings(BaseSettings):
     # side-view landmark accuracy while cutting peak RAM on hi-res phone
     # footage. Clients may still override per-request (240–1080).
     detection_height_default: int = 720
+    # Max height (px) for the annotated OUTPUT video. Rendering + H.264
+    # transcoding a full-res clip (e.g. 2120x1174) can OOM-kill ffmpeg on a
+    # small container; capping the output keeps memory bounded. 0 = no cap.
+    output_height_max: int = 720
     # Max jobs that may be queued or processing at once. New uploads beyond
     # this are rejected with 429 to bound disk/memory usage.
     max_active_jobs: int = 8

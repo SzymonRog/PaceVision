@@ -28,6 +28,7 @@ import numpy as np
 from analysis.angles import AngleCalculator
 from analysis.stride_detector import DEFAULT_CONTACT_METHOD
 from analysis.thresholds import get_threshold
+from core.config import settings
 from pose.detector import PoseDetector
 from pose.landmarks import LandmarkProcessor
 from pose.smoothing import SavitzkyGolayBuffer
@@ -289,10 +290,16 @@ class VideoPipeline:
         If ffmpeg is unavailable, the mp4v file is kept as a fallback so the
         clip is at least downloadable.
         """
+        # Cap the output resolution: rendering + H.264 transcoding a full-res
+        # clip can OOM-kill ffmpeg on a small container. The overlay is drawn
+        # from normalised coords, so a smaller frame renders identically.
+        out_w, out_h = self._output_dims(width, height)
+        downscale = (out_w, out_h) != (width, height)
+
         # Render to a sibling temp file; transcode into output_path afterwards.
         raw_path = f"{output_path}.raw.mp4"
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        writer = cv2.VideoWriter(raw_path, fourcc, video_fps, (width, height))
+        writer = cv2.VideoWriter(raw_path, fourcc, video_fps, (out_w, out_h))
         if not writer.isOpened():
             raise ValueError(f"Cannot create output video: {raw_path}")
 
@@ -312,6 +319,11 @@ class VideoPipeline:
                 ret, frame = cap.read()
                 if not ret:
                     break
+
+                if downscale:
+                    frame = cv2.resize(
+                        frame, (out_w, out_h), interpolation=cv2.INTER_AREA,
+                    )
 
                 if frame_idx in angles_by_frame:
                     last_angles = angles_by_frame[frame_idx]
@@ -343,6 +355,21 @@ class VideoPipeline:
 
         # Transcode the mp4v render into browser-playable H.264.
         self._transcode_to_h264(raw_path, output_path, video_fps)
+
+    @staticmethod
+    def _output_dims(width: int, height: int) -> tuple[int, int]:
+        """Output (w, h) capped to ``output_height_max``, with even sides.
+
+        H.264 yuv420p requires even dimensions. 0 / no cap returns the source
+        size (still evened).
+        """
+        max_h = settings.output_height_max
+        if max_h and height > max_h:
+            out_h = max_h
+            out_w = int(round(width * (max_h / height)))
+        else:
+            out_w, out_h = width, height
+        return out_w - (out_w % 2), out_h - (out_h % 2)
 
     @staticmethod
     def _transcode_to_h264(raw_path: str, output_path: str, video_fps: float) -> None:
@@ -377,6 +404,9 @@ class VideoPipeline:
                 "-pix_fmt", "yuv420p",
                 "-preset", "veryfast",
                 "-crf", "23",
+                # Single-threaded encode bounds peak memory (avoids the
+                # OOM SIGKILL seen with multi-threaded libx264 on small hosts).
+                "-threads", "1",
                 "-r", f"{video_fps:.6f}",
                 "-movflags", "+faststart",
                 "-an",
